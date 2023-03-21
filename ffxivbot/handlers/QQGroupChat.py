@@ -14,15 +14,73 @@ import time
 import redis
 from collections import Counter
 
+def get_tuling_reply(
+        request_msg: str,
+        token: str,
+        userId: str,
+        groupId: str,
+        TULING_API_URL: str,
+    ):
+    tuling_data = {}
+    tuling_data["reqType"] = 0
+    tuling_data["perception"] = {"inputText": {"text": request_msg}}
+    tuling_data["userInfo"] = {
+        "apiKey": token,
+        "userId": userId,
+        "groupId": groupId,
+    }
+    r = requests.post(
+        url=TULING_API_URL, data=json.dumps(tuling_data), timeout=3
+    )
+    tuling_reply = r.json()
+    # logging.debug("tuling reply:%s"%(r.text))
+    msg = ""
+    for item in tuling_reply["results"]:
+        if item["resultType"] == "text":
+            msg += item["values"]["text"]
+    return msg
+
+def get_openai_reply(
+        request_msg: str,
+        model: str,
+        OPENAI_API_KEY: str,
+    ):
+    openai_data = {
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": request_msg,
+        }]
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {OPENAI_API_KEY}"
+    }
+    r = requests.post(
+        url='https://api.openai.com/v1/chat/completions',
+        headers=headers,
+        data=json.dumps(openai_data),
+        timeout=30
+    )
+    openai_reply = r.json()
+    if "error" in openai_reply:
+        print(f"Error handling chatgpt api: {openai_reply['error']['message']}")
+        return f"Error: {openai_reply['error']['type']}"
+    msg = ""
+    for item in openai_reply["choices"]:
+        msg += item.get('message', {}).get('content', '') + '\n'
+    return msg.strip()
+
+
 
 def QQGroupChat(*args, **kwargs):
     try:
         global_config = kwargs.get("global_config", None)
         group = kwargs.get("group", None)
         user_info = kwargs.get("user_info", None)
-        QQ_BASE_URL = global_config.get("QQ_BASE_URL", None)
         TULING_API_URL = global_config.get("TULING_API_URL", None)
         TULING_API_KEY = global_config.get("TULING_API_KEY", None)
+        OPENAI_API_KEY = global_config.get("OPENAI_API_KEY", "")
         ADMIN_ID = global_config.get("ADMIN_ID", "")
         BOT_FATHER = global_config.get("BOT_FATHER", None)
         BOT_MOTHER = global_config.get("BOT_MOTHER", None)
@@ -33,9 +91,10 @@ def QQGroupChat(*args, **kwargs):
         user_id = receive["user_id"]
         group_id = receive["group_id"]
         group_commands = json.loads(group.commands)
+        bot_commands = json.loads(bot.commands)
 
         # custom replys
-        reply_enable = group_commands.get("/reply", "enable") != "disable"
+        reply_enable = check_command_enabled('/reply', bot_commands, group_commands)
         if reply_enable:
             try:
                 match_replys = CustomReply.objects.filter(
@@ -94,7 +153,7 @@ def QQGroupChat(*args, **kwargs):
                 )
 
         # jieba tokenize and wordcloud
-        url_pattern = r"(?:http|https):\/\/((?:[\w-]+)(?:\.[\w-]+)+)(?:[\w.,@?^=%&amp;:\/~+#-]*[\w@?^=%&amp;\/~+#-])?"
+        url_pattern = r"((?:http|https):\/\/)?((?:[\w-]+)(?:\.[a-zA-Z0-9_-]+)+)(?:[\w.,@?^=%&amp;:\/~+#-]*[\w@?^=%&amp;\/~+#-])?"
         word_pattern = r"^([\u4e00-\u9fff\w]+)$"
         group_id_hash = hashlib.md5(
             ("{}|{}".format(group.group_id, settings.SECRET_KEY)).encode()
@@ -114,19 +173,17 @@ def QQGroupChat(*args, **kwargs):
             group_mem.update({"words": word_cnt})
             r.set(group_id_hash, json.dumps(group_mem))
 
-        # tuling chatbot
-        chat_enable = group_commands.get("/chat", "enable") != "disable"
+        # chatbot
+        chat_enable = check_command_enabled('/chat', bot_commands, group_commands)
         at_self_pattern = "\[CQ:at,qq={}(,text=.*)?\]".format(receive["self_id"])
         reply_pattern = "\[CQ:reply,id=.*?\]"
-        chatting = re.search(at_self_pattern, receive["message"],) is not None
+        chatting = re.search(at_self_pattern, receive["message"]) is not None
         wechat = False
         if "self_wechat_id" in receive:
             wechat = True
             mentions = receive["data"]["payload"].get("mention", [])
             chatting = mentions and mentions[0] == receive["self_wechat_id"]
-            print("mentions:{} chatting:{}".format(mentions, chatting))
         if chatting and chat_enable:
-            # print("Chatting: {}".format(message))
             user = QQUser.objects.filter(user_id=user_id)
             if user.exists():
                 user = user.first()
@@ -140,29 +197,27 @@ def QQGroupChat(*args, **kwargs):
             receive_msg = message
             receive_msg = re.sub(at_self_pattern, "", receive_msg)
             receive_msg = re.sub(reply_pattern, "", receive_msg)
-            tuling_data = {}
-            tuling_data["reqType"] = 0
-            tuling_data["perception"] = {"inputText": {"text": receive_msg}}
-            tuling_data["userInfo"] = {
-                "apiKey": TULING_API_KEY
-                if bot.tuling_token == ""
-                else bot.tuling_token,
-                "userId": receive["user_id"] if not wechat else ADMIN_ID,
-                "groupId": group.group_id,
-            }
-            r = requests.post(
-                url=TULING_API_URL, data=json.dumps(tuling_data), timeout=3
-            )
-            tuling_reply = r.json()
-            # logging.debug("tuling reply:%s"%(r.text))
-            msg = ""
-            for item in tuling_reply["results"]:
-                if item["resultType"] == "text":
-                    msg += item["values"]["text"]
-            if bot.tuling_token == "":
-                msg = msg.replace("图灵工程师爸爸", BOT_FATHER)
-                msg = msg.replace("图灵工程师妈妈", BOT_MOTHER)
-                msg = msg.replace("小主人", USER_NICKNAME)
+            tuling_token = TULING_API_KEY if bot.tuling_token == "" else bot.tuling_token
+            if group.chat_model == 'tuling':
+                msg = get_tuling_reply(
+                    receive_msg,
+                    tuling_token,
+                    receive["user_id"] if not wechat else ADMIN_ID,
+                    group.group_id,
+                    TULING_API_URL,
+                )
+                if bot.tuling_token == "":
+                    msg = msg.replace("图灵工程师爸爸", BOT_FATHER)
+                    msg = msg.replace("图灵工程师妈妈", BOT_MOTHER)
+                    msg = msg.replace("小主人", USER_NICKNAME)
+            elif group.chat_model == 'chatgpt':
+                msg = get_openai_reply(
+                    receive_msg,
+                    'gpt-3.5-turbo',
+                    OPENAI_API_KEY,
+                )
+            else:
+                msg = f"不支持的聊天模型：{group.chat_model}"
             msg = re.sub(url_pattern, "http://ff.sdo.com", msg)
             msg = "[CQ:at,qq=%s] " % (receive["user_id"]) + msg
             action = reply_message_action(receive, msg)

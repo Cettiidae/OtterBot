@@ -62,6 +62,13 @@ def get_CQ_image(CQ_text):
 
 def reply_message_action(receive, msg):
     action = {"action": "", "params": {}, "echo": ""}
+    if type(msg) == list:
+        msg.append({
+            "type": "reply",
+            "data": {"id": receive["message_id"]}
+        })
+    else:
+        msg += f"[CQ:reply,id={receive['message_id']}]"
     if receive["message_type"] == "group":
         action.update(
             {
@@ -887,3 +894,14 @@ def update_konachan_tags():
     json.dump(reserved_tags,
               open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "resources", "konachan_tags.json"), 'w',
                    encoding='utf-8'))
+
+
+def check_command_enabled(
+    command: str,
+    bot_commands: dict,
+    group_commands: dict = {}):
+    if group_commands.get(command, "enable") == "disable":
+        return False
+    if bot_commands.get(command, "enable") == "disable":
+        return False
+    return True
